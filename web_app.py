@@ -5,9 +5,7 @@ Run with: streamlit run web_app.py
 from __future__ import annotations
 
 import html
-import hmac
 import json
-import os
 import re
 import threading
 import time
@@ -25,9 +23,7 @@ MODEL_ID = "amazon.nova-lite-v1:0"
 SEVERITIES = ["low", "medium", "high", "critical"]
 
 
-# FLOWSENTINEL_PUBLIC_GUARD_V1
-# Public-demo protection: fail closed without an out-of-repository access code.
-ACCESS_CODE_ENV = "FLOWSENTINEL_ACCESS_CODE"
+# Public demo usage limits.
 SESSION_LIMIT = 5
 SESSION_WINDOW_SECONDS = 10 * 60
 GLOBAL_LIMIT = 20
@@ -38,34 +34,6 @@ _GLOBAL_REQUEST_LOCK = threading.Lock()
 
 class DemoRateLimitError(RuntimeError):
     """Raised when the hosted demo has reached its usage budget."""
-
-
-def enforce_access_gate() -> None:
-    """Require a shared access code before rendering any interactive controls."""
-    expected = os.environ.get(ACCESS_CODE_ENV, "").strip()
-    if not expected:
-        st.error(
-            "This demo is locked because access protection is not configured. "
-            "Set the FLOWSENTINEL_ACCESS_CODE environment variable before starting Streamlit."
-        )
-        st.stop()
-
-    if st.session_state.get("_flowsentinel_authenticated") is True:
-        return
-
-    st.title("FlowSentinel Demo Access")
-    st.write("Enter the demo access code provided by the project owner to try the playground.")
-    with st.form("flowsentinel_access_form"):
-        supplied = st.text_input("Access code", type="password", autocomplete="current-password")
-        submitted = st.form_submit_button("Open playground", type="primary", use_container_width=True)
-
-    if submitted:
-        if hmac.compare_digest(supplied.strip(), expected):
-            st.session_state["_flowsentinel_authenticated"] = True
-            st.rerun()
-        else:
-            st.error("That access code is not valid. Please try again.")
-    st.stop()
 
 
 def consume_demo_quota() -> None:
@@ -381,8 +349,6 @@ def render_execution(events: list[dict[str, Any]]) -> None:
 
 
 st.set_page_config(page_title="FlowSentinel Playground", page_icon="🛡️", layout="wide")
-enforce_access_gate()
-
 st.markdown(
     """
     <style>
