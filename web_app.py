@@ -15,6 +15,7 @@ from typing import Any
 
 import streamlit as st
 from strands import Agent, tool
+from strands.models import BedrockModel
 
 from _decider_client import Decider, DEFAULT_URL
 from flowsentinel_guard import GroundedToolGuard, require_explicit_task_title
@@ -246,7 +247,7 @@ def run_live_agent(user_request: str) -> dict[str, Any]:
         "was created or sent."
     )
     agent = Agent(
-        model=MODEL_ID,
+        model=BedrockModel(model_id=MODEL_ID, region_name="us-east-1"),
         tools=make_simulated_tools(execution_log),
         interventions=[guard],
         system_prompt=system_prompt,
