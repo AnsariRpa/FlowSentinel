@@ -129,8 +129,11 @@ The client defaults to `http://127.0.0.1:8099`. The optional `STRANDS_DECIDER_UR
 In **Terminal 2**, from the project root with the virtual environment active:
 
 ```powershell
+$env:FLOWSENTINEL_ACCESS_CODE = "replace-with-a-long-random-code"
 streamlit run web_app.py
 ```
+
+Set `FLOWSENTINEL_ACCESS_CODE` to a strong private value before starting the app. The app fails closed if the variable is missing. Do not commit or publish the code. The demo also limits each browser session to 5 submissions per 10 minutes and the running app process to 20 submissions per hour. These in-memory limits reset if Streamlit restarts.
 
 Open the local URL printed by Streamlit, usually `http://localhost:8501`.
 

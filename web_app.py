@@ -5,8 +5,13 @@ Run with: streamlit run web_app.py
 from __future__ import annotations
 
 import html
+import hmac
 import json
+import os
 import re
+import threading
+import time
+from collections import deque
 from types import SimpleNamespace
 from typing import Any
 
@@ -18,6 +23,82 @@ from flowsentinel_guard import GroundedToolGuard, require_explicit_task_title
 
 MODEL_ID = "amazon.nova-lite-v1:0"
 SEVERITIES = ["low", "medium", "high", "critical"]
+
+
+# FLOWSENTINEL_PUBLIC_GUARD_V1
+# Public-demo protection: fail closed without an out-of-repository access code.
+ACCESS_CODE_ENV = "FLOWSENTINEL_ACCESS_CODE"
+SESSION_LIMIT = 5
+SESSION_WINDOW_SECONDS = 10 * 60
+GLOBAL_LIMIT = 20
+GLOBAL_WINDOW_SECONDS = 60 * 60
+_GLOBAL_REQUEST_TIMES: deque[float] = deque()
+_GLOBAL_REQUEST_LOCK = threading.Lock()
+
+
+class DemoRateLimitError(RuntimeError):
+    """Raised when the hosted demo has reached its usage budget."""
+
+
+def enforce_access_gate() -> None:
+    """Require a shared access code before rendering any interactive controls."""
+    expected = os.environ.get(ACCESS_CODE_ENV, "").strip()
+    if not expected:
+        st.error(
+            "This demo is locked because access protection is not configured. "
+            "Set the FLOWSENTINEL_ACCESS_CODE environment variable before starting Streamlit."
+        )
+        st.stop()
+
+    if st.session_state.get("_flowsentinel_authenticated") is True:
+        return
+
+    st.title("FlowSentinel Demo Access")
+    st.write("Enter the demo access code provided by the project owner to try the playground.")
+    with st.form("flowsentinel_access_form"):
+        supplied = st.text_input("Access code", type="password", autocomplete="current-password")
+        submitted = st.form_submit_button("Open playground", type="primary", use_container_width=True)
+
+    if submitted:
+        if hmac.compare_digest(supplied.strip(), expected):
+            st.session_state["_flowsentinel_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("That access code is not valid. Please try again.")
+    st.stop()
+
+
+def consume_demo_quota() -> None:
+    """Limit actual live-agent and direct-proposal runs, not just page requests.
+
+    Per-session limit: 5 operations per 10 minutes.
+    Per-process global limit: 20 operations per hour.
+    The global in-memory counter resets if the app process restarts; use a
+    gateway/WAF or durable store for stronger production-grade rate limiting.
+    """
+    now = time.monotonic()
+    recent_session = [
+        stamp for stamp in st.session_state.get("_flowsentinel_request_times", [])
+        if now - stamp < SESSION_WINDOW_SECONDS
+    ]
+    if len(recent_session) >= SESSION_LIMIT:
+        raise DemoRateLimitError(
+            "You've reached the demo limit of 5 submissions per 10 minutes for this browser session. "
+            "Please wait a little before trying again."
+        )
+
+    with _GLOBAL_REQUEST_LOCK:
+        while _GLOBAL_REQUEST_TIMES and now - _GLOBAL_REQUEST_TIMES[0] >= GLOBAL_WINDOW_SECONDS:
+            _GLOBAL_REQUEST_TIMES.popleft()
+        if len(_GLOBAL_REQUEST_TIMES) >= GLOBAL_LIMIT:
+            raise DemoRateLimitError(
+                "The shared demo has reached its limit of 20 submissions per hour. "
+                "Please try again later."
+            )
+        _GLOBAL_REQUEST_TIMES.append(now)
+
+    recent_session.append(now)
+    st.session_state["_flowsentinel_request_times"] = recent_session
 
 
 def validate_incident(tool_name: str, arguments: dict[str, Any], user_text: str) -> str | None:
@@ -183,6 +264,7 @@ def summarize_simulated_actions(events: list[dict[str, Any]], fallback_response:
 
 
 def run_live_agent(user_request: str) -> dict[str, Any]:
+    consume_demo_quota()
     decider = Decider()
     guard = make_guard(decider)
     execution_log: list[dict[str, Any]] = []
@@ -215,6 +297,7 @@ def run_live_agent(user_request: str) -> dict[str, Any]:
 
 def run_direct_proposal(request: str, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Call the intervention directly; intentionally attaches no executable tool."""
+    consume_demo_quota()
     decider = Decider()
     guard = make_guard(decider)
     messages = [{"role": "user", "content": [{"text": request}]}]
@@ -298,6 +381,8 @@ def render_execution(events: list[dict[str, Any]]) -> None:
 
 
 st.set_page_config(page_title="FlowSentinel Playground", page_icon="🛡️", layout="wide")
+enforce_access_gate()
+
 st.markdown(
     """
     <style>
@@ -333,6 +418,7 @@ with st.sidebar:
     st.markdown("### What this demonstrates")
     st.markdown("- **Proceed** when grounded\n- **Block** unsupported details\n- **Clarify** missing required information")
     st.caption("The guard threshold is experimental, not a production safety guarantee.")
+    st.caption("Demo usage limits: 5 submissions per 10 minutes per browser session, with a shared limit of 20 per hour.")
 
 live_tab, proposal_tab, evaluation_tab = st.tabs(["Live agent", "Test a proposal", "Evaluation evidence"])
 
@@ -355,6 +441,8 @@ with live_tab:
                 with st.spinner("Running the Bedrock agent and reviewing proposed tool calls…"):
                     st.session_state["last_live_result"] = run_live_agent(live_request.strip())
                     st.session_state["last_live_request"] = live_request.strip()
+            except DemoRateLimitError as exc:
+                st.warning(str(exc))
             except Exception as exc:
                 st.error(f"Run failed: {type(exc).__name__}: {exc}")
                 st.caption("Check the Decider server, AWS credentials, region and Bedrock model access.")
@@ -396,6 +484,8 @@ with proposal_tab:
             try:
                 with st.spinner("Evaluating proposed arguments with FlowSentinel…"):
                     st.session_state["last_proposal_result"] = run_direct_proposal(proposal_request.strip(), proposal_tool, proposal_args)
+            except DemoRateLimitError as exc:
+                st.warning(str(exc))
             except Exception as exc:
                 st.error(f"Evaluation failed: {type(exc).__name__}: {exc}")
                 st.caption("Check that the Decider server is running and reachable.")
